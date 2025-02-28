@@ -1,2 +1,2 @@
 # Sparse_Matrix_Tuning
-official github repo for ICLR-2025 paper, fine-tuning large language models with sparse matrices. Code will be open-sourced shortly.
+Official github repo for ICLR-2025 paper, "Fine-Tuning Large Language Models with Sparse Matrices". Code will be open-sourced shortly.
