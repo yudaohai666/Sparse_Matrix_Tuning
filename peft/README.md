@@ -30,8 +30,8 @@
 Please download the dataset: [LLM-Adapters](https://github.com/AGI-Edgerunners/LLM-Adapters/tree/main/ft-training_set).
 
 
-# Example Commands
-## Evaluation using deepspeed/accelerate environment
+## Example Commands
+### Evaluation using deepspeed/accelerate environment
 
 ```
 accelerate launch \
