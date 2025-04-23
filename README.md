@@ -34,11 +34,13 @@ We implemented SMT in two frameworks: DeepSpeed and Hugging Face Trainer/PEFT. I
 
 >Observation 2: Deepseek-R1-Distill-LLaMA8B model largely outperforms the base LLaMA-3-8B model on Math Reasoning dataset with reasoning trace.
 
+|DeepSeek-R1-DistillLLaMA8B Model| GSM8k | SingleEq  | SVAMP  | MultiArith | AddSub | AQuA | AVG   |
+|---------------------------|-------|-----------|--------|------------|--------|----|----------|
+| SMT(0.71%)    | 60.8  | 92.5  | 70.6  | 95.3      | 87.3       |  31.2  |  73.0|
+
+
 |LLaMA3-8B Model| GSM8k | SingleEq  | SVAMP  | MultiArith | AddSub | AQuA | AVG   |
 |---------------------------|-------|-----------|--------|------------|--------|----|----------|
 | SMT(0.71%)    | 42.8  | 88.5  | 60.4  | 93.9      | 85.8       |  25.2  |  66.1|
 
-|DeepSeek-R1-DistillLLaMA8B Model| GSM8k | SingleEq  | SVAMP  | MultiArith | AddSub | AQuA | AVG   |
-|---------------------------|-------|-----------|--------|------------|--------|----|----------|
-| SMT(0.71%)    | 60.8  | 92.5  | 70.6  | 95.3      | 87.3       |  31.2  |  73.0|
 
