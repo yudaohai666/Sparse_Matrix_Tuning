@@ -26,7 +26,7 @@
 
 ## Datasets
 
-Please download the dataset: [LLM-Adapters](https://github.com/AGI-Edgerunners/LLM-Adapters/tree/main/ft-training_set).
+Please download the common sense dataset: [LLM-Adapters](https://github.com/AGI-Edgerunners/LLM-Adapters/tree/main/ft-training_set).
 
 
 ## Example Commands
@@ -63,4 +63,23 @@ deepspeed --include=localhost:0,1,2,3 --master_port 64940 fine_tune.py \
     2> "/ocean/projects/cis250057p/hhe4/LLM-FT/deepspeed/logs/DeepSeek-R1-Distill-Llama-8B_04020_2034_smt/err_matrix_.log"
 ```
 
+### Evaluation
+```
+cd evaluation
+```
 
+Then launch evaluation with `accelerate`:
+```
+accelerate launch \
+  --main_process_port 64941 \
+  --gpu_ids '0,1,2,3' \
+  evaluation/run_commonsense_parallel.py \
+  --data_path /home/sidaw/Projects/llm/LLM-FT/data/commonsense/dataset/ \
+  --model_name_or_path meta-llama/Meta-Llama-3-8B \
+  --tokenizer_path meta-llama/Meta-Llama-3-8B \
+  --per_device_eval_batch_size 4 \
+  --seed 1234 \
+  --dtype bf16 \
+  --dataset boolq piqa social_i_qa ARC-Challenge ARC-Easy openbookqa hellaswag winogrande \
+  --output_dir logs/evaluation
+```
