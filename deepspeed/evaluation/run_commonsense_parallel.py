@@ -20,6 +20,7 @@ accelerate launch \
 # 3. https://github.com/aksh555/LoRA-Soups/blob/main/utils.py
 # 4. https://github.com/AGI-Edgerunners/LLM-Adapters/blob/main/commonsense_evaluate.py;
 
+import tqdm
 import argparse
 import os
 import sys
@@ -28,6 +29,8 @@ sys.path.insert(0,
 import re
 import json
 import torch
+
+
 from helpers.deepspeed_helpers import (
     print_rank_0,
     synchronize_index_list,
@@ -95,105 +98,126 @@ def extract_answer(dataset, sentence: str) -> float:
             return ""
         return pred_answers[0]
 
+from transformers import StoppingCriteria
+class KeyWordsCriteria(StoppingCriteria):
+    def __init__(self, stop_id_sequences):
+        assert isinstance(
+            stop_id_sequences[0],
+            list), "stop_id_sequences should be a list of list of ids"
+        self.stop_sequences = stop_id_sequences
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor,
+                 **kwargs) -> bool:
+        sequences_should_be_stopped = []
+        for i in range(input_ids.shape[0]):
+            for stop_sequence in self.stop_sequences:
+                if input_ids[i][-len(stop_sequence):].tolist(
+                ) == stop_sequence:
+                    sequences_should_be_stopped.append(True)
+                    break
+            sequences_should_be_stopped.append(False)
+        return all(sequences_should_be_stopped)
+
 @torch.no_grad()
-def generate_text_completions(
-        model, device, tokenizer, prompt_list,
-        batch_size=1, stop_sequences=None, disable_progress=False,
-        verbose=False, **generation_options
-):
-    """
-    Generate text completions for a list of prompts using a pre-trained model.
+def generate_completions(model,
+                         device,
+                         tokenizer,
+                         prompts,
+                         batch_size=1,
+                         stop_id_sequences=None,
+                         disable_tqdm=False,
+                         verbose=False,
+                         **generation_kwargs):
+    generations = []
+    if hasattr(model, "module"):
+        print_rank_0(f'-----{model.module.generation_config}-----')
+    else:
+        print_rank_0(f'-----{model.generation_config}-----')
 
-    Args:
-        model: The pre-trained model for text generation.
-        device: The device (e.g., 'cpu' or 'cuda') to execute the model on.
-        tokenizer: The tokenizer associated with the model.
-        prompt_list: A list of prompts for which completions are needed.
-        batch_size: Number of prompts to process in one batch.
-        stop_sequences: List of sequences that signal when to stop generation.
-        disable_progress: If True, disables the progress bar display.
-        verbose: If True, outputs intermediate results for debugging.
-        generation_options: Additional options for text generation.
+    if generation_kwargs:
+        print_rank_0(f'-----{generation_kwargs}-----')
 
-    Returns:
-        A list of generated text completions, one per prompt in the input list.
-    """
-    results = []
+    if not disable_tqdm:
+        progress = tqdm.tqdm(total=len(prompts), desc="Generating Completions")
 
-    # Initialize progress bar if enabled
-    progress_bar = None
-    if not disable_progress:
-        progress_bar = tqdm.tqdm(total=len(prompt_list), desc="Generating Text")
-
-    # Retrieve number of return sequences per prompt
-    return_sequences_count = generation_options.get("num_return_sequences", 1)
-
-    # Process prompts in batches
-    for start_idx in range(0, len(prompt_list), batch_size):
-        # Extract current batch of prompts
-        current_batch = prompt_list[start_idx:start_idx + batch_size]
-
-        # Tokenize the batch of prompts
-        token_data = tokenizer(current_batch, padding='longest', return_tensors="pt")
-        input_ids = token_data.input_ids.to(device)
-        attention_masks = token_data.attention_mask.to(device)
+    num_return_sequences = generation_kwargs.get("num_return_sequences", 1)
+    for i in range(0, len(prompts), batch_size):
+        batch_prompts = prompts[i:i + batch_size]
+        tokenized_prompts = tokenizer(batch_prompts,
+                                      padding='longest',
+                                      return_tensors="pt")
+        batch_input_ids = tokenized_prompts.input_ids
+        attention_mask = tokenized_prompts.attention_mask
+        batch_input_ids = batch_input_ids.to(device)
+        attention_mask = attention_mask.to(device)
 
         try:
-            # Generate text completions for the current batch
-            generated_outputs = model.generate(
-                input_ids=input_ids,
-                attention_mask=attention_masks,
+            batch_outputs = model.generate(
+                input_ids=batch_input_ids,
+                attention_mask=attention_mask,
                 eos_token_id=tokenizer.eos_token_id,
-                stopping_criteria=[KeyWordsCriteria(stop_sequences)] if stop_sequences else None,
-                **generation_options
-            )
-            generated_outputs = generated_outputs.detach().cpu()
+                stopping_criteria=[KeyWordsCriteria(stop_id_sequences)]
+                if stop_id_sequences else None,
+                **generation_kwargs)
+            batch_outputs = batch_outputs.detach().cpu()
 
-            # Apply stopping criteria to trim unwanted tokens
-            if stop_sequences:
-                for seq_idx in range(generated_outputs.shape[0]):
-                    for token_idx in range(input_ids.shape[1], generated_outputs.shape[1]):
-                        if any(generated_outputs[seq_idx, token_idx: token_idx + len(seq)].tolist() == seq for seq in
-                               stop_sequences):
-                            generated_outputs[seq_idx, token_idx:] = tokenizer.pad_token_id
+            # the stopping criteria is applied at batch level, so if other examples are not stopped, the entire batch will continue to generate.
+            # so some outputs still have the stop sequence, which we need to remove.
+            if stop_id_sequences:
+                for output_idx in range(batch_outputs.shape[0]):
+                    for token_idx in range(batch_input_ids.shape[1],
+                                           batch_outputs.shape[1]):
+                        if any(batch_outputs[output_idx, token_idx:token_idx +
+                                             len(stop_sequence)].tolist() ==
+                               stop_sequence
+                               for stop_sequence in stop_id_sequences):
+                            batch_outputs[output_idx,
+                                          token_idx:] = tokenizer.pad_token_id
                             break
 
-            # Replace invalid tokens with unknown token ID
-            generated_outputs[generated_outputs >= tokenizer.vocab_size] = tokenizer.unk_token_id
-            generated_outputs[generated_outputs == -1] = tokenizer.unk_token_id
+            # in case piece id out of range
+            batch_outputs[
+                batch_outputs >= tokenizer.vocab_size] = tokenizer.unk_token_id
+            batch_outputs[batch_outputs == -1] = tokenizer.unk_token_id
 
-            # Decode both the outputs and prompts to text
-            decoded_outputs = tokenizer.batch_decode(generated_outputs, skip_special_tokens=True)
-            decoded_prompts = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
-
-            # Duplicate prompts to match the number of return sequences per prompt
-            repeated_prompts = [prompt for prompt in decoded_prompts for _ in range(return_sequences_count)]
-
-            # Extract the generated content by removing the prompt prefix
-            batch_results = [
-                text[len(prompt):] for prompt, text in zip(repeated_prompts, decoded_outputs)
+            # remove the prompt from the output
+            # we need to re-encode the prompt because we need to make sure the special tokens are treated the same way as in the outputs.
+            # we changed our previous way of truncating the output token ids dicrectly because some tokenizer (e.g., llama) won't add space token before the first token.
+            # space is important for some tasks (e.g., code completion).
+            batch_outputs = tokenizer.batch_decode(batch_outputs,
+                                                   skip_special_tokens=True)
+            batch_prompts = tokenizer.batch_decode(batch_input_ids,
+                                                   skip_special_tokens=True)
+            # duplicate the prompts to match the number of return sequences
+            batch_prompts = [
+                prompt for prompt in batch_prompts
+                for _ in range(num_return_sequences)
             ]
-        except Exception as error:
-            # Handle any errors in generation by returning empty results for the batch
-            batch_results = [""] * len(current_batch) * return_sequences_count
+            batch_generations = [
+                output[len(prompt):]
+                for prompt, output in zip(batch_prompts, batch_outputs)
+            ]
+        except Exception as e:
+            print("Error when generating completions for batch:")
+            print("Error message:")
+            print(e)
+            print("Use empty string as the completion.")
+            batch_generations = [""
+                                 ] * len(batch_prompts) * num_return_sequences
 
-        # Append the results of the current batch to the final list
-        results.extend(batch_results)
+        generations += batch_generations
 
-        # Update the progress bar if enabled
-        if progress_bar:
-            progress_bar.update(len(current_batch) // return_sequences_count)
+        if verbose:
+            print("--------")
+            print(batch_generations[0])
 
-    # Close progress bar if it was used
-    if progress_bar:
-        progress_bar.close()
+        if not disable_tqdm:
+            progress.update(len(batch_prompts) // num_return_sequences)
 
-    # Ensure the number of results matches expectations
-    assert len(results) == len(prompt_list) * return_sequences_count, (
-        "Mismatch in the number of results and expected completions"
-    )
-    return results
-
+    assert len(generations) == len(
+        prompts
+    ) * num_return_sequences, "number of generations should be equal to number of prompts * num_return_sequences"
+    return generations
 
 @torch.no_grad()
 def main(args):
@@ -201,12 +225,13 @@ def main(args):
     set_random_seed(args.seed)
 
     print_rank_0("Loading model and tokenizer...")
-    tokenizer = load_hf_tokenizer(args.tokenizer_path, fast_tokenizer=True)
+    tokenizer = load_hf_tokenizer(args.tokenizer_path, max_seq_len=8192, fast_tokenizer=True)
 
     if '8b' in args.model_name_or_path.lower():
         tokenizer.unk_token_id =0
         # tokenizer.padding_side = "right"
 
+    tokenizer.unk_token_id =0
     tokenizer.padding_side = "left"
     print_rank_0(f"tokenizer pad side: {tokenizer.padding_side}")
 
@@ -250,11 +275,12 @@ def main(args):
             prompts.append(prompt)
         print_rank_0(prompts[0])
 
+
         accelerator.wait_for_everyone()
         device = accelerator.device
         with accelerator.split_between_processes(prompts) as prompt:
             model_outputs = []
-            outputs = generate_text_completions(
+            outputs = generate_completions(
                 model=model,
                 device=device,
                 tokenizer=tokenizer,
@@ -273,6 +299,7 @@ def main(args):
             example['raw_output'] = output
             target = example["answer"].lower()
             predict = extract_answer(dataset, output)
+            print("target", target, "predict", predict)
             if target == predict:
                 correct += 1
             example['prediction'] = predict
